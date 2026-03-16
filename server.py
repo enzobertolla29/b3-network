@@ -17,8 +17,10 @@ cotacoes = {
     "ITUB4": 28.90
 }
 
-estados = {}   
-clientes = []  
+usuarios = {}
+
+estados = {}
+clientes = []
 
 def send(conn, msg):
     #Envia a mensagem ao cliente em bytes com brakeline
@@ -47,10 +49,12 @@ def format_prices():
 def format_help_server():
     return "\n".join([
         "[INFO] Comandos disponíveis:",
-        "  :buy <ATIVO> <QTD>   -> ordem de compra",
-        "  :sell <ATIVO> <QTD>  -> ordem de venda",
-        "  :carteira            -> exibe saldo e ativos",
-        "  :exit                -> encerra conexão"
+        "  :register <USUARIO> <SENHA> -> registrar novo usuário",
+        "  :login <USUARIO> <SENHA>    -> autenticar-se",
+        "  :buy <ATIVO> <QTD>          -> ordem de compra",
+        "  :sell <ATIVO> <QTD>         -> ordem de venda",
+        "  :carteira                   -> exibe saldo e ativos",
+        "  :exit                       -> encerra conexão"
     ])
 
 
@@ -160,7 +164,7 @@ def handle_carteira(conn):
 def handle_client(conn, addr):
     with lock:
         clientes.append(conn)
-        estados[conn] = {"saldo": 10_000.0, "carteira": {}}
+        estados[conn] = {"saldo": 10000.0, "carteira": {}, "nome": None, "autenticado": False}
 
     hora = datetime.now().strftime("%H:%M:%S")
     mensagem_inicial = "\n".join([
