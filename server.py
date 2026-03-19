@@ -9,6 +9,7 @@ from contextlib import suppress
 HOST = "0.0.0.0" 
 PORT = 9999
 
+
 lock = threading.Lock()  
 
 cotacoes = {
@@ -21,6 +22,7 @@ usuarios = {}
 
 estados = {}
 clientes = []
+
 
 def send(conn, msg):
     #Envia a mensagem ao cliente em bytes com brakeline
@@ -59,7 +61,6 @@ def format_help_server():
 
 
 def price_simulation_thread():
-    
     while True:
         time.sleep(random.uniform(1.0, 2.0))  
         with lock:
@@ -83,55 +84,120 @@ def parse_qtd(valor):
         return qtd
     except ValueError:
         return None
+    
+
+def get_usuario_autenticado(conn):
+    # Retorna o usuário logado na conexão
+    with lock:
+        sessao = estados.get(conn)
+
+        if not sessao or not sessao["autenticado"] or not sessao["nome"]:
+            return None, "[ERRO] Faça login com :login primeiro."
+
+        nome = sessao["nome"]
+        usuario = usuarios.get(nome)
+
+        if usuario is None:
+            return None, "[ERRO] Usuário não encontrado."
+
+    return usuario, None
+
+def usuario_ja_conectado(conn, nome):
+    for outra_conn, sessao in estados.items():
+        if outra_conn != conn and sessao["autenticado"] and sessao["nome"] == nome:
+            return True
+    return False
+
+def handle_register(nome, senha):
+    with lock:
+        if nome in usuarios:
+            return "[ERRO] Usuário já existe."
+
+        usuarios[nome] = {
+            "senha": senha,
+            "saldo": 1000.0,
+            "carteira": {}
+        }
+
+    return f"[OK] Usuário '{nome}' registrado com sucesso."
+
+def handle_login(conn, nome, senha):
+    with lock:
+        if nome not in usuarios:
+            return "[ERRO] Credenciais inválidas."
+
+        if usuarios[nome]["senha"] != senha:
+            return "[ERRO] Credenciais inválidas."
+
+        if usuario_ja_conectado(conn, nome):
+            return "[ERRO] Usuário já conectado em outra sessão."
+
+        estados[conn]["nome"] = nome
+        estados[conn]["autenticado"] = True
+
+    return f"[OK] Login realizado com sucesso como '{nome}'."
 
 
 def handle_buy(conn, ativo, qtd):
     with lock:
+        sessao = estados.get(conn)
+        if not sessao or not sessao["autenticado"] or not sessao["nome"]:
+            return "[ERRO] Faça login com :login primeiro."
+
+        nome = sessao["nome"]
+
+        if nome not in usuarios:
+            return "[ERRO] Usuário não encontrado."
+
         if ativo not in cotacoes:
             return "[ERRO] Ativo inválido."
 
+        usuario = usuarios[nome]
         preco = cotacoes[ativo]
         total = round(preco * qtd, 2)
 
-        estado = estados.get(conn)
-        if estado is None:
-            return "[ERRO] Estado do cliente não encontrado."
-
-        if estado["saldo"] < total:
+        if usuario["saldo"] < total:
             return f"[ERRO] Saldo insuficiente. Necessário: R$ {total:.2f}"
 
-        estado["saldo"] = round(estado["saldo"] - total, 2)
-        estado["carteira"][ativo] = estado["carteira"].get(ativo, 0) + qtd
-        saldo_atual = estado["saldo"]
+        usuario["saldo"] = round(usuario["saldo"] - total, 2)
+        usuario["carteira"][ativo] = usuario["carteira"].get(ativo, 0) + qtd
+        saldo_atual = usuario["saldo"]
 
     return (
         f"[OK] Você executou: COMPRA de {qtd}x {ativo} "
         f"@ R$ {preco:.2f} = R$ {total:.2f} | Saldo: R$ {saldo_atual:.2f}"
     )
 
-
 def handle_sell(conn, ativo, qtd):
     with lock:
+        sessao = estados.get(conn)
+        if not sessao or not sessao["autenticado"] or not sessao["nome"]:
+            return "[ERRO] Faça login com :login primeiro."
+
+        nome = sessao["nome"]
+
+        if nome not in usuarios:
+            return "[ERRO] Usuário não encontrado."
+
         if ativo not in cotacoes:
             return "[ERRO] Ativo inválido."
 
-        estado = estados.get(conn)
-        if estado is None:
-            return "[ERRO] Estado do cliente não encontrado."
+        usuario = usuarios[nome]
+        quantidade_atual = usuario["carteira"].get(ativo, 0)
 
-        quantidade_atual = estado["carteira"].get(ativo, 0)
         if quantidade_atual < qtd:
             return f"[ALERTA] Você possui apenas {quantidade_atual}x {ativo}."
 
         preco = cotacoes[ativo]
         total = round(preco * qtd, 2)
 
-        estado["saldo"] = round(estado["saldo"] + total, 2)
-        estado["carteira"][ativo] -= qtd
-        if estado["carteira"][ativo] == 0:
-            del estado["carteira"][ativo]
+        usuario["saldo"] = round(usuario["saldo"] + total, 2)
+        usuario["carteira"][ativo] -= qtd
 
-        saldo_atual = estado["saldo"]
+        if usuario["carteira"][ativo] == 0:
+            del usuario["carteira"][ativo]
+
+        saldo_atual = usuario["saldo"]
 
     return (
         f"[OK] Você executou: VENDA de {qtd}x {ativo} "
@@ -140,21 +206,29 @@ def handle_sell(conn, ativo, qtd):
 
 
 def handle_carteira(conn):
+    # Exibe carteira do usuário logado
     with lock:
-        estado = estados.get(conn)
-        if estado is None:
-            return "[ERRO] Estado do cliente não encontrado."
+        sessao = estados.get(conn)
+        if not sessao or not sessao["autenticado"] or not sessao["nome"]:
+            return "[ERRO] Faça login com :login primeiro."
+
+        nome = sessao["nome"]
+
+        if nome not in usuarios:
+            return "[ERRO] Usuário não encontrado."
+
+        usuario = usuarios[nome]
 
         linhas = [
-            "[INFO] Carteira do usuário",
-            f"Saldo: R$ {estado['saldo']:.2f}",
+            f"[INFO] Carteira de {nome}",
+            f"Saldo: R$ {usuario['saldo']:.2f}",
             "Ativos:"
         ]
 
-        if not estado["carteira"]:
+        if not usuario["carteira"]:
             linhas.append("  (vazia)")
         else:
-            for ativo, qtd in estado["carteira"].items():
+            for ativo, qtd in usuario["carteira"].items():
                 preco_atual = cotacoes.get(ativo, 0.0)
                 linhas.append(f"  {ativo}: {qtd} ações @ R$ {preco_atual:.2f}")
 
@@ -164,7 +238,7 @@ def handle_carteira(conn):
 def handle_client(conn, addr):
     with lock:
         clientes.append(conn)
-        estados[conn] = {"saldo": 10000.0, "carteira": {}, "nome": None, "autenticado": False}
+        estados[conn] = {"nome": None, "autenticado": False}
 
     hora = datetime.now().strftime("%H:%M:%S")
     mensagem_inicial = "\n".join([
@@ -207,6 +281,26 @@ def handle_client(conn, addr):
                 if cmd == ":exit":
                     safe_send(conn, "[INFO] Até logo!")
                     return
+
+                elif cmd == ":register":
+                    if len(partes) != 3:
+                        safe_send(conn, "[ERRO] Uso: :register <USUARIO> <SENHA>")
+                        continue
+
+                    nome = partes[1]
+                    senha = partes[2]
+                    resposta = handle_register(nome, senha)
+                    safe_send(conn, resposta)
+
+                elif cmd == ":login":
+                    if len(partes) != 3:
+                        safe_send(conn, "[ERRO] Uso: :login <USUARIO> <SENHA>")
+                        continue
+
+                    nome = partes[1]
+                    senha = partes[2]
+                    resposta = handle_login(conn, nome, senha)
+                    safe_send(conn, resposta)
 
                 elif cmd == ":buy":
                     if len(partes) != 3:
@@ -257,6 +351,7 @@ def handle_client(conn, addr):
             conn.close()
 
         print(f"[-] Cliente desconectado: {addr}")
+
 
 
 def main():
