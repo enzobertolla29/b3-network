@@ -4,6 +4,8 @@ import time
 import random
 from datetime import datetime
 from contextlib import suppress
+import sys
+import queue
 
 # Escuta em todas as interfaces de rede disponíveis
 HOST = "0.0.0.0" 
@@ -22,6 +24,7 @@ usuarios = {}
 
 estados = {}
 clientes = []
+filas_envio = {}  # conn -> queue.Queue[str]
 
 
 def send(conn, msg):
@@ -29,18 +32,23 @@ def send(conn, msg):
     conn.sendall((msg + "\n").encode())  
 
 def safe_send(conn, msg):
-    """Envia com proteção contra queda de conexão."""
+    """Enfileira mensagem para o cliente (proteção contra queda de conexão)."""
+    with lock:
+        q = filas_envio.get(conn)
+    if q is None:
+        return False
+
     try:
-        send(conn, msg)
+        q.put_nowait(msg)
         return True
-    except OSError:
+    except Exception:
         return False
 
 def broadcast(msg):
     with lock:
-        copia = list(clientes)  
+        copia = list(clientes)
     for conn in copia:
-        send(conn, msg)  
+        safe_send(conn, msg)
 
 def format_prices():
     with lock:
@@ -235,25 +243,48 @@ def handle_carteira(conn):
     return "\n".join(linhas)
 
 
-def handle_client(conn, addr):
+def cleanup_client(conn):
     with lock:
-        clientes.append(conn)
-        estados[conn] = {"nome": None, "autenticado": False}
+        if conn in clientes:
+            clientes.remove(conn)
+        estados.pop(conn, None)
+        filas_envio.pop(conn, None)
 
+    with suppress(OSError):
+        conn.shutdown(socket.SHUT_RDWR)
+    with suppress(OSError):
+        conn.close()
+
+
+def client_sender(conn):
+    while True:
+        with lock:
+            q = filas_envio.get(conn)
+
+        if q is None:
+            return
+
+        msg = q.get()
+        if msg is None:
+            return
+
+        try:
+            send(conn, msg)
+        except OSError:
+            return
+
+
+def client_receiver(conn, addr):
     hora = datetime.now().strftime("%H:%M:%S")
     mensagem_inicial = "\n".join([
         f"{hora}: CONECTADO!!",
+        "[INFO] Faça :register ou :login antes de operar.",
         format_prices(),
         format_help_server()
     ])
 
     if not safe_send(conn, mensagem_inicial):
-        with lock:
-            if conn in clientes:
-                clientes.remove(conn)
-            estados.pop(conn, None)
-        with suppress(OSError):
-            conn.close()
+        cleanup_client(conn)
         return
 
     print(f"[+] Cliente conectado: {addr}")
@@ -342,25 +373,47 @@ def handle_client(conn, addr):
     except OSError:
         pass
     finally:
-        with lock:
-            if conn in clientes:
-                clientes.remove(conn)
-            estados.pop(conn, None)
-
-        with suppress(OSError):
-            conn.close()
-
+        cleanup_client(conn)
         print(f"[-] Cliente desconectado: {addr}")
 
 
+def handle_client(conn, addr):
+    with lock:
+        clientes.append(conn)
+        estados[conn] = {"nome": None, "autenticado": False}
+        filas_envio[conn] = queue.Queue()
+
+    t_send = threading.Thread(target=client_sender, args=(conn,), daemon=True)
+    t_recv = threading.Thread(target=client_receiver, args=(conn, addr), daemon=True)
+
+    t_send.start()
+    t_recv.start()
+
+
+def parse_max_conexoes():
+    if len(sys.argv) < 2:
+        return 5
+
+    try:
+        valor = int(sys.argv[1])
+        if valor <= 0:
+            raise ValueError
+        return valor
+    except ValueError:
+        print("[ERRO] MAX_CONEXOES inválido. Use inteiro positivo. Exemplo: python server.py 5")
+        raise SystemExit(1)
+
 
 def main():
+    max_conexoes = parse_max_conexoes()
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((HOST, PORT))
         server_sock.listen(5)
 
         print(f"Servidor aguardando conexões em {HOST}:{PORT} ...")
+        print(f"Limite de conexões simultâneas: {max_conexoes}")
 
         threading.Thread(target=price_simulation_thread, daemon=True).start()
         threading.Thread(target=feed_thread, daemon=True).start()
@@ -368,11 +421,18 @@ def main():
         with suppress(KeyboardInterrupt):
             while True:
                 conn, addr = server_sock.accept()
-                threading.Thread(
-                    target=handle_client,
-                    args=(conn, addr),
-                    daemon=True
-                ).start()
+
+                with lock:
+                    lotado = len(clientes) >= max_conexoes
+
+                if lotado:
+                    with suppress(OSError):
+                        send(conn, "[ERRO] Servidor cheio. Tente novamente mais tarde.")
+                    with suppress(OSError):
+                        conn.close()
+                    continue
+
+                handle_client(conn, addr)
 
     print("Servidor encerrado.")
 
