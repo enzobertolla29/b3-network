@@ -47,10 +47,14 @@ def loop_entrada(sock):
 def doc():
     print("─" * 45)
     print("Comandos disponíveis:")
-    print("  :buy <ATIVO> <QTD>   — ordem de compra")
-    print("  :sell <ATIVO> <QTD>  — ordem de venda")
-    print("  :carteira            — saldo e ativos possuídos")
-    print("  :exit                — encerrar conexão")
+    print("  :register <USUARIO> <SENHA> — registrar")
+    print("  :login <USUARIO> <SENHA>    — autenticar")
+    print("  :logout                     — encerrar sessão")
+    print("  :quem                       — usuário logado")
+    print("  :buy <ATIVO> <QTD>          — ordem de compra")
+    print("  :sell <ATIVO> <QTD>         — ordem de venda")
+    print("  :carteira                   — saldo e ativos")
+    print("  :exit                       — encerrar conexão")
     print("─" * 45)
 
 def main():

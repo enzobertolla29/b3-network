@@ -1,4 +1,4 @@
-import socket 
+import socket
 import threading
 import time
 import random
@@ -6,10 +6,13 @@ from datetime import datetime
 from contextlib import suppress
 import sys
 import queue
+import json
+import os
 
 # Escuta em todas as interfaces de rede disponíveis
-HOST = "0.0.0.0" 
+HOST = "0.0.0.0"
 PORT = 9999
+USUARIOS_FILE = "usuarios.json"
 
 
 lock = threading.Lock()  
@@ -25,6 +28,31 @@ usuarios = {}
 estados = {}
 clientes = []
 filas_envio = {}  # conn -> queue.Queue[str]
+
+
+def carregar_usuarios():
+    """Carrega usuarios.json se existir."""
+    if not os.path.exists(USUARIOS_FILE):
+        return
+    try:
+        with open(USUARIOS_FILE, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+            with lock:
+                usuarios.update(dados)
+        print(f"[INFO] {len(dados)} usuário(s) carregado(s) de {USUARIOS_FILE}")
+    except Exception as e:
+        print(f"[ERRO] Falha ao carregar {USUARIOS_FILE}: {e}")
+
+
+def salvar_usuarios():
+    """Salva usuarios em usuarios.json."""
+    try:
+        with lock:
+            copia = dict(usuarios)
+        with open(USUARIOS_FILE, "w", encoding="utf-8") as f:
+            json.dump(copia, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[ERRO] Falha ao salvar {USUARIOS_FILE}: {e}")
 
 
 def send(conn, msg):
@@ -61,6 +89,8 @@ def format_help_server():
         "[INFO] Comandos disponíveis:",
         "  :register <USUARIO> <SENHA> -> registrar novo usuário",
         "  :login <USUARIO> <SENHA>    -> autenticar-se",
+        "  :logout                     -> encerra sessão (mantém conexão)",
+        "  :quem                       -> exibe usuário logado",
         "  :buy <ATIVO> <QTD>          -> ordem de compra",
         "  :sell <ATIVO> <QTD>         -> ordem de venda",
         "  :carteira                   -> exibe saldo e ativos",
@@ -127,6 +157,7 @@ def handle_register(nome, senha):
             "carteira": {}
         }
 
+    salvar_usuarios()
     return f"[OK] Usuário '{nome}' registrado com sucesso."
 
 def handle_login(conn, nome, senha):
@@ -144,6 +175,32 @@ def handle_login(conn, nome, senha):
         estados[conn]["autenticado"] = True
 
     return f"[OK] Login realizado com sucesso como '{nome}'."
+
+
+def handle_logout(conn):
+    """Encerra a sessão do usuário sem fechar a conexão TCP."""
+    with lock:
+        sessao = estados.get(conn)
+        if not sessao or not sessao["autenticado"]:
+            return "[ERRO] Você não está logado."
+
+        nome = sessao["nome"]
+        sessao["nome"] = None
+        sessao["autenticado"] = False
+
+    return f"[OK] Logout realizado. Até logo, {nome}!"
+
+
+def handle_quem(conn):
+    """Retorna o nome do usuário autenticado na conexão atual."""
+    with lock:
+        sessao = estados.get(conn)
+        if not sessao or not sessao["autenticado"] or not sessao["nome"]:
+            return "[INFO] Você não está logado."
+
+        nome = sessao["nome"]
+
+    return f"[INFO] Você está logado como '{nome}'."
 
 
 def handle_buy(conn, ativo, qtd):
@@ -171,6 +228,7 @@ def handle_buy(conn, ativo, qtd):
         usuario["carteira"][ativo] = usuario["carteira"].get(ativo, 0) + qtd
         saldo_atual = usuario["saldo"]
 
+    salvar_usuarios()
     return (
         f"[OK] Você executou: COMPRA de {qtd}x {ativo} "
         f"@ R$ {preco:.2f} = R$ {total:.2f} | Saldo: R$ {saldo_atual:.2f}"
@@ -207,6 +265,7 @@ def handle_sell(conn, ativo, qtd):
 
         saldo_atual = usuario["saldo"]
 
+    salvar_usuarios()
     return (
         f"[OK] Você executou: VENDA de {qtd}x {ativo} "
         f"@ R$ {preco:.2f} = R$ {total:.2f} | Saldo: R$ {saldo_atual:.2f}"
@@ -245,6 +304,11 @@ def handle_carteira(conn):
 
 def cleanup_client(conn):
     with lock:
+        sessao = estados.get(conn)
+        # Salva antes de desconectar se estava autenticado
+        if sessao and sessao["autenticado"]:
+            salvar_usuarios()
+
         if conn in clientes:
             clientes.remove(conn)
         estados.pop(conn, None)
@@ -333,6 +397,14 @@ def client_receiver(conn, addr):
                     resposta = handle_login(conn, nome, senha)
                     safe_send(conn, resposta)
 
+                elif cmd == ":logout":
+                    resposta = handle_logout(conn)
+                    safe_send(conn, resposta)
+
+                elif cmd == ":quem":
+                    resposta = handle_quem(conn)
+                    safe_send(conn, resposta)
+
                 elif cmd == ":buy":
                     if len(partes) != 3:
                         safe_send(conn, "[ERRO] Uso: :buy <ATIVO> <QTD>")
@@ -405,6 +477,7 @@ def parse_max_conexoes():
 
 
 def main():
+    carregar_usuarios()
     max_conexoes = parse_max_conexoes()
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
