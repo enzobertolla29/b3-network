@@ -1,6 +1,7 @@
 import socket
 import sys
 import threading
+from contextlib import suppress
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9999
@@ -15,10 +16,10 @@ def receber(sock):
         while run.is_set():
             dados = sock.recv(4096) # 4096 qtd maxima de bytes a receber
             if not dados:
-                print("\n[Servidor encerrou a conexão]")
+                print("\n[INFO]Servidor encerrou a conexão]")
                 run.clear()
                 break
-            buf = buf + dados.decode()
+            buf = buf + dados.decode("utf-8",errors="ignore")
             while "\n" in buf:
                 linha, buf = buf.split("\n", 1)
                 if linha:
@@ -32,17 +33,29 @@ def loop_entrada(sock):
     doc()
     try:
         while run.is_set():
-            cmd = input("> ").strip()
+            try:
+                cmd = input("> ").strip()
+            except EOFError:
+                cmd = ":exit"
             if not cmd:
                 continue
-            sock.sendall((cmd + "\n").encode())
+            try:
+                sock.sendall((cmd + "\n").encode("utf-8"))
+            except OSError:
+                print("\n[INFO] Não foi possível enviar o comando, conexão encerrada.")
+                run.clear()
+                break
             if cmd.lower() == ":exit":
                 break
+
     except EOFError:
         pass
     finally:
         run.clear()
-        sock.close()
+        with suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
+        with suppress(OSError):
+            sock.close()
 
 def doc():
     print("─" * 45)
@@ -66,6 +79,9 @@ def main():
         sock.connect((host, port))
     except ConnectionRefusedError:
         print("Erro: nao foi possivel conectar a", host, ":", port)
+        sys.exit(1)
+    except OSError as e:
+        print("Erro de conexao:", e)
         sys.exit(1)
 
     print("Conectado a", host, ":", port)

@@ -15,7 +15,9 @@ PORT = 9999
 USUARIOS_FILE = "usuarios.json"
 
 
-lock = threading.Lock()  
+lock = threading.RLock()
+running = threading.Event()
+running.set()  
 
 cotacoes = {
     "PETR4": 38.50,
@@ -38,6 +40,7 @@ def carregar_usuarios():
         with open(USUARIOS_FILE, "r", encoding="utf-8") as f:
             dados = json.load(f)
             with lock:
+                usuarios.clear()
                 usuarios.update(dados)
         print(f"[INFO] {len(dados)} usuário(s) carregado(s) de {USUARIOS_FILE}")
     except Exception as e:
@@ -57,7 +60,7 @@ def salvar_usuarios():
 
 def send(conn, msg):
     #Envia a mensagem ao cliente em bytes com brakeline
-    conn.sendall((msg + "\n").encode())  
+    conn.sendall((msg + "\n").encode())     
 
 def safe_send(conn, msg):
     """Enfileira mensagem para o cliente (proteção contra queda de conexão)."""
@@ -75,8 +78,12 @@ def safe_send(conn, msg):
 def broadcast(msg):
     with lock:
         copia = list(clientes)
+    desconectados = []
     for conn in copia:
-        safe_send(conn, msg)
+        if not safe_send(conn, msg):
+            desconectados.append(conn)
+    for conn in desconectados:
+        cleanup_client(conn,save_first=False)  # Salva apenas no cleanup final para evitar múltiplas escritas simultâneas
 
 def format_prices():
     with lock:
@@ -99,7 +106,7 @@ def format_help_server():
 
 
 def price_simulation_thread():
-    while True:
+    while running.is_set():
         time.sleep(random.uniform(1.0, 2.0))  
         with lock:
             for ativo in cotacoes:
@@ -108,9 +115,10 @@ def price_simulation_thread():
                 cotacoes[ativo] = max(0.01, novo_preco) 
 
 def feed_thread():
-    while True:
+    while running.is_set():
         time.sleep(5)
-        broadcast(format_prices())
+        if running.is_set():
+            broadcast(format_prices())
 
 
 def parse_qtd(valor):
@@ -141,13 +149,19 @@ def get_usuario_autenticado(conn):
     return usuario, None
 
 def usuario_ja_conectado(conn, nome):
+    #with lock:
     for outra_conn, sessao in estados.items():
-        if outra_conn != conn and sessao["autenticado"] and sessao["nome"] == nome:
-            return True
+            if outra_conn != conn and sessao["autenticado"] and sessao["nome"] == nome:
+                return True
     return False
 
-def handle_register(nome, senha):
+def handle_register(conn,nome, senha):
     with lock:
+        sessao = estados.get(conn)
+        if sessao is None:
+            return "[ERRO] Sessão não encontrada."
+        if sessao["autenticado"]:
+            return f"[ERRO] Você já está logado como '{sessao['nome']}'. Faça :logout antes de registrar outro usuário."
         if nome in usuarios:
             return "[ERRO] Usuário já existe."
 
@@ -162,6 +176,13 @@ def handle_register(nome, senha):
 
 def handle_login(conn, nome, senha):
     with lock:
+        sessao = estados.get(conn)
+        if sessao is None:
+            return "[ERRO] Sessão não encontrada."
+        
+        if sessao["autenticado"]:
+            return f"[ERRO] Você já está logado como '{sessao['nome']}'. Faça :logout antes de logar com outro usuário."
+
         if nome not in usuarios:
             return "[ERRO] Credenciais inválidas."
 
@@ -171,8 +192,10 @@ def handle_login(conn, nome, senha):
         if usuario_ja_conectado(conn, nome):
             return "[ERRO] Usuário já conectado em outra sessão."
 
-        estados[conn]["nome"] = nome
-        estados[conn]["autenticado"] = True
+          
+        
+        sessao["nome"] = nome
+        sessao["autenticado"] = True
 
     return f"[OK] Login realizado com sucesso como '{nome}'."
 
@@ -187,7 +210,7 @@ def handle_logout(conn):
         nome = sessao["nome"]
         sessao["nome"] = None
         sessao["autenticado"] = False
-
+    salvar_usuarios()
     return f"[OK] Logout realizado. Até logo, {nome}!"
 
 
@@ -302,17 +325,21 @@ def handle_carteira(conn):
     return "\n".join(linhas)
 
 
-def cleanup_client(conn):
+def cleanup_client(conn, save_first=True):
     with lock:
         sessao = estados.get(conn)
-        # Salva antes de desconectar se estava autenticado
-        if sessao and sessao["autenticado"]:
-            salvar_usuarios()
-
+        autenticado=bool(sessao and sessao.get("autenticado"))
+        
         if conn in clientes:
             clientes.remove(conn)
+
         estados.pop(conn, None)
-        filas_envio.pop(conn, None)
+        q=filas_envio.pop(conn, None)
+    if save_first and autenticado:
+        salvar_usuarios()
+    if q is not None:
+        with suppress(Exception):
+            q.put_nowait(None)  # Sinaliza para a thread de envio encerrar  
 
     with suppress(OSError):
         conn.shutdown(socket.SHUT_RDWR)
@@ -321,20 +348,25 @@ def cleanup_client(conn):
 
 
 def client_sender(conn):
-    while True:
+    while running.is_set():
         with lock:
             q = filas_envio.get(conn)
 
         if q is None:
             return
 
-        msg = q.get()
+        try:
+            msg = q.get(timeout=1)  # Espera por mensagens para enviar, mas verifica periodicamente se deve encerrar
+        except queue.Empty:
+            continue
+
         if msg is None:
             return
-
+        
         try:
             send(conn, msg)
         except OSError:
+            cleanup_client(conn, save_first=False)
             return
 
 
@@ -348,7 +380,7 @@ def client_receiver(conn, addr):
     ])
 
     if not safe_send(conn, mensagem_inicial):
-        cleanup_client(conn)
+        cleanup_client(conn, save_first=False)
         return
 
     print(f"[+] Cliente conectado: {addr}")
@@ -356,7 +388,7 @@ def client_receiver(conn, addr):
     buf = ""
 
     try:
-        while True:
+        while running.is_set():
             dados = conn.recv(1024)
             if not dados:
                 break
@@ -375,6 +407,7 @@ def client_receiver(conn, addr):
 
                 if cmd == ":exit":
                     safe_send(conn, "[INFO] Até logo!")
+                    time.sleep(0.5)  # Dá tempo do cliente receber a mensagem antes de fechar
                     return
 
                 elif cmd == ":register":
@@ -384,7 +417,7 @@ def client_receiver(conn, addr):
 
                     nome = partes[1]
                     senha = partes[2]
-                    resposta = handle_register(nome, senha)
+                    resposta = handle_register(conn,nome, senha)
                     safe_send(conn, resposta)
 
                 elif cmd == ":login":
@@ -475,6 +508,20 @@ def parse_max_conexoes():
         print("[ERRO] MAX_CONEXOES inválido. Use inteiro positivo. Exemplo: python server.py 5")
         raise SystemExit(1)
 
+def shutdown_server(server_sock=None):
+    print("\n[INFO] Encerrando servidor...")
+    running.clear()
+    salvar_usuarios()
+    with lock:
+        conexoes = list(clientes)
+
+    for conn in conexoes:
+        cleanup_client(conn,save_first=False)
+
+    if server_sock is not None:
+        with suppress(OSError):
+            server_sock.close()    
+
 
 def main():
     carregar_usuarios()
@@ -484,16 +531,19 @@ def main():
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((HOST, PORT))
         server_sock.listen(5)
-
+        
         print(f"Servidor aguardando conexões em {HOST}:{PORT} ...")
         print(f"Limite de conexões simultâneas: {max_conexoes}")
 
         threading.Thread(target=price_simulation_thread, daemon=True).start()
         threading.Thread(target=feed_thread, daemon=True).start()
 
-        with suppress(KeyboardInterrupt):
-            while True:
-                conn, addr = server_sock.accept()
+        try:
+            while running.is_set():
+                try:
+                    conn, addr = server_sock.accept()
+                except OSError:
+                    break
 
                 with lock:
                     lotado = len(clientes) >= max_conexoes
@@ -506,7 +556,10 @@ def main():
                     continue
 
                 handle_client(conn, addr)
-
+        except KeyboardInterrupt:
+            print("\n[INFO] Encerrando servidor...")
+        finally:
+            shutdown_server(server_sock)
     print("Servidor encerrado.")
 
 if __name__ == "__main__":
