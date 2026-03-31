@@ -130,23 +130,6 @@ def parse_qtd(valor):
         return qtd
     except ValueError:
         return None
-    
-
-def get_usuario_autenticado(conn):
-    # Retorna o usuário logado na conexão
-    with lock:
-        sessao = estados.get(conn)
-
-        if not sessao or not sessao["autenticado"] or not sessao["nome"]:
-            return None, "[ERRO] Faça login com :login primeiro."
-
-        nome = sessao["nome"]
-        usuario = usuarios.get(nome)
-
-        if usuario is None:
-            return None, "[ERRO] Usuário não encontrado."
-
-    return usuario, None
 
 def usuario_ja_conectado(conn, nome):
     #with lock:

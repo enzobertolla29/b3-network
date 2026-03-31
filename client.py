@@ -12,13 +12,19 @@ run.set()
 
 def receber(sock):
     buf = ""
+    primeira_msg = True
     try:
         while run.is_set():
             dados = sock.recv(4096) # 4096 qtd maxima de bytes a receber
             if not dados:
-                print("\n[INFO]Servidor encerrou a conexão]")
+                print("\n[INFO] Servidor encerrou a conexão.")
                 run.clear()
                 break
+            
+            if primeira_msg:
+                doc()
+                primeira_msg = False
+
             buf = buf + dados.decode("utf-8",errors="ignore")
             while "\n" in buf:
                 linha, buf = buf.split("\n", 1)
@@ -30,7 +36,6 @@ def receber(sock):
         run.clear()
 
 def loop_entrada(sock):
-    doc()
     try:
         while run.is_set():
             try:
